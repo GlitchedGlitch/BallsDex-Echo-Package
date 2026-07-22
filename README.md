@@ -12,7 +12,7 @@ Run this eval
 ```toml
 # Echo Package
 [[ballsdex.packages]]
-location = "git+https://github.com/GlitchedGlitch/BallsDex-Echo-Package.git@main"
+location = "git+https://github.com/GlitchedGlitch/BallsDex-Echo-Package.git@1.0.0#main"
 path = "echo"
 enabled = true
 ```
