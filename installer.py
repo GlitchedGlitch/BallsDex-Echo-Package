@@ -6,7 +6,7 @@ import io, os, re, traceback, discord
 from discord.ui import View, Button, Modal, TextInput
 
 REPO        = "GlitchedGlitch/BallsDex-Echo-Package"
-BRANCH      = "main"
+BRANCH      = "1.0.0#main"
 GIT_URL     = f"git+https://github.com/{REPO}.git@{BRANCH}"
 APP_PATH    = "echo"
 TOML_MARKER = f'path = "{APP_PATH}"'
