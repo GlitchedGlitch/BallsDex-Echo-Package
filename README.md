@@ -3,16 +3,33 @@
 This package allows you to send messages as your dex! Please don't send weird shi
 
 ## How to install
-Run this eval
-
-```py
-.eval import base64, requests; code = base64.b64decode(requests.get("https://api.github.com/repos/GlitchedGlitch/BallsDex-Echo-Package/contents/installer.py").json()["content"]).decode(); wrapped = "async def __installer(bot, ctx):\n" + "\n".join("    " + l for l in code.splitlines()); globs = {"bot": bot, "ctx": ctx}; exec(wrapped, globs); await globs["__installer"](bot, ctx)
-```
- Or just paste this in config/extra.toml
+Add this to config/extra.toml (or create the file if it doesn't exist)
 ```toml
 # Echo Package
 [[ballsdex.packages]]
-location = "git+https://github.com/GlitchedGlitch/BallsDex-Echo-Package.git@1.0.0#main"
+location = "git+https://github.com/GlitchedGlitch/BallsDex-Echo-Package.git@2.0.0"
 path = "echo"
 enabled = true
 ```
+
+## Features
+This package has a lot of features!!!
+| Feature | Description |
+|---------|-------------|
+|Message|Send a custom text message (duh)|
+|File|Add a custom file (image, video, audio, basically any file uploadable to discord!)|
+|Style|Choose between embed or container, basically wrap around your custom text a message style!|
+|Channel|Choose a custom channel to send the message, works with links and channel ids (even outside the server!)|
+|DM|Send the message in someone's dms instead|
+|Reply|Put a message link so make the message reply to an user|
+|edit_message|Edit a message sent by the bot instead|
+|delete_message|Delete a given message instead of sending|
+|Mention|If mentions should be on|
+|Preview|Preview your message before sending|
+
+There are also special qol characters to make your life easier!
+
+| Character | Description |
+|-----------|-------------|
+| {e:Ball Full Name} |Send a ball emoji if available|
+| {s:line} | Create a separator line on container style |
