@@ -10,8 +10,8 @@ from discord.ext import commands
 
 from ballsdex.core.discord import LayoutView, View
 from ballsdex.core.utils import checks
-from bd_models.models import Ball
-from settings.models import settings
+
+from .extra import LINE_RE, resolve
 
 if TYPE_CHECKING:
     from ballsdex.core.bot import BallsDexBot
@@ -20,8 +20,6 @@ type Interaction = discord.Interaction["BallsDexBot"]
 
 log = logging.getLogger("ballsdex.packages.echo")
 
-LINE_RE = re.compile(r"\{s:line\}", re.IGNORECASE)
-EMOJI_RE = re.compile(r"\{e:([^{}]+)\}", re.IGNORECASE)
 PREVIEW_TIMEOUT = 120
 
 
@@ -31,63 +29,151 @@ def webhook_log(message: str):
     extra = {"webhook": {"params": {"allowed_mentions": discord.AllowedMentions.none()}}}
     log.info(message, extra=extra)
 
-def unknown_balls_warning(names: list[str]) -> str:
-    formatted = ", ".join(f"`{name}`" for name in names)
-    noun = f"{settings.collectible_name}" if len(names) == 1 else f"{settings.plural_collectible_name}"
-    verb = "doesn't" if len(names) == 1 else "don't"
-
-    return (
-        f"The {noun} {formatted} {verb} exist. "
-        "Are you sure you typed the full name correctly? "
-        "Do you still want to proceed sending the message?"
-    )
 
 class Draft:
     """
     A message ready to be sent, edited or previewed.
-    Views and files can only be used once, so everything is rebuilt on every call.
     """
 
-    def __init__(self, text: str | None, style: str | None, attachment: discord.Attachment | None, data: bytes | None):
+    def __init__(
+        self,
+        text: str | None,
+        style: str | None,
+        attachment: discord.Attachment | None,
+        data: bytes | None,
+    ):
         self.text = text
         self.style = style
         self.attachment = attachment
         self.data = data
-        self.filename = re.sub(r"[^\w.\-]", "_", attachment.filename) if attachment else None
+        self.filename = (
+            re.sub(r"[^\w.\-]", "_", attachment.filename)
+            if attachment
+            else None
+        )
+
+    def update_from(self, other: "Draft") -> None:
+        self.text = other.text
+        self.attachment = other.attachment
+        self.data = other.data
+        self.filename = other.filename
 
     def files(self) -> list[discord.File]:
         if not self.attachment or self.data is None or not self.filename:
             return []
-        return [discord.File(io.BytesIO(self.data), filename=self.filename)]
+
+        return [
+            discord.File(
+                io.BytesIO(self.data),
+                filename=self.filename,
+            )
+        ]
 
     def attachment_item(self) -> discord.ui.Item | None:
         if not self.attachment or not self.filename:
             return None
+
         url = f"attachment://{self.filename}"
+
         if (self.attachment.content_type or "").startswith("image/"):
-            return discord.ui.MediaGallery(discord.MediaGalleryItem(url))
+            return discord.ui.MediaGallery(
+                discord.MediaGalleryItem(url)
+            )
+
         return discord.ui.File(url)
 
     def container(self, with_file: bool = True) -> discord.ui.Container:
         container = discord.ui.Container()
-        segments = [s.strip() for s in LINE_RE.split(self.text or "") if s.strip()]
-        for i, segment in enumerate(segments):
-            if i:
-                container.add_item(discord.ui.Separator(visible=True))
-            container.add_item(discord.ui.TextDisplay(segment))
+
+        segments = [
+            segment.strip()
+            for segment in LINE_RE.split(self.text or "")
+            if segment.strip()
+        ]
+
+        for index, segment in enumerate(segments):
+            if index:
+                container.add_item(
+                    discord.ui.Separator(visible=True)
+                )
+
+            container.add_item(
+                discord.ui.TextDisplay(segment)
+            )
+
         if with_file and (item := self.attachment_item()):
             container.add_item(item)
+
         return container
 
     def payload(self, with_file: bool = True) -> dict:
-        """Keyword arguments for `send()` / `edit()`."""
+        """Return keyword arguments for sending this draft."""
+        files = self.files() if with_file else []
+
         if self.style == "Container":
             view = LayoutView(timeout=None)
             view.add_item(self.container(with_file))
-            return {"view": view, "files": self.files() if with_file else []}
+            return {
+                "view": view,
+                "files": files,
+            }
+
         if self.style == "Embed":
-            return {"embed": discord.Embed(description=self.text), "files": self.files() if with_file else []}
-        return {"content": self.text, "files": self.files() if with_file else []}
+            return {
+                "embed": discord.Embed(description=self.text),
+                "files": files,
+            }
+
+        return {
+            "content": self.text,
+            "files": files,
+        }
+
+    def edit_payload(self) -> dict:
+        """Return keyword arguments for editing an existing message."""
+        if self.style == "Container":
+            view = LayoutView(timeout=None)
+            view.add_item(self.container(with_file=False))
+            return {
+                "content": None,
+                "embed": None,
+                "view": view,
+            }
+
+        if self.style == "Embed":
+            return {
+                "content": None,
+                "embed": discord.Embed(description=self.text),
+            }
+
+        return {
+            "content": self.text,
+            "embed": None,
+        }
+
+
+class EditExtraModal(discord.ui.Modal, title="Edit message"):
+    message = discord.ui.TextInput(
+        label="Message",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=4000,
+    )
+
+    def __init__(
+        self,
+        original_text: str | None,
+        on_submit_callback,
+    ):
+        super().__init__()
+        self.message.default = original_text or ""
+        self.on_submit_callback = on_submit_callback
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.on_submit_callback(
+            interaction,
+            self.message.value,
+        )
 
 
 class Echo(commands.Cog):
@@ -110,26 +196,46 @@ class Echo(commands.Cog):
 
         self.command = self.make_command()
         group.app_command.add_command(self.command)
-        log.info("Attached /admin echo")
 
     async def cog_unload(self):
         group = getattr(self.bot.get_cog("Admin"), "admin", None)
         if group is not None and self.command is not None:
             group.app_command.remove_command(self.command.name)
 
-    async def fetch_message(self, link: str) -> tuple[discord.Message | None, str | None]:
+    async def fetch_message(
+        self,
+        link: str,
+    ) -> tuple[discord.Message | None, str | None]:
         try:
             parts = link.strip().rstrip("/").split("/")
             channel_id, message_id = int(parts[-2]), int(parts[-1])
         except (ValueError, IndexError):
-            return None, "Invalid message link. Copy it via **Copy Message Link** in Discord."
+            return (
+                None,
+                "Invalid message link. Copy it via **Copy Message Link** in Discord.",
+            )
+    
         channel = self.bot.get_channel(channel_id)
+    
         if not isinstance(channel, discord.TextChannel):
-            return None, "Could not find the channel from the message link. Make sure the bot has access to it."
+            return (
+                None,
+                "Could not find the channel from the message link. "
+                "Make sure the bot has access to it.",
+            )
+    
         try:
             return await channel.fetch_message(message_id), None
         except discord.NotFound:
-            return None, "Could not find the message. Make sure the link is correct."
+            return (
+                None,
+                "Could not find the message. Make sure the link is correct.",
+            )
+        except discord.Forbidden:
+            return (
+                None,
+                "I don't have permission to access that message.",
+            )
 
     def parse_channel(self, value: str) -> discord.TextChannel | None:
         value = value.strip()
@@ -147,37 +253,36 @@ class Echo(commands.Cog):
 
         return channel if isinstance(channel, discord.TextChannel) else None
 
-    async def resolve_emojis(self, text: str) -> tuple[str, list[str]]:
-        """Replace known ball placeholders and return names that could not be resolved."""
-        names = list(dict.fromkeys(
-            name.strip()
-            for name in EMOJI_RE.findall(text)
-        ))
-
-        found: dict[str, str] = {}
-        missing: list[str] = []
-
-        for name in names:
-            ball = await Ball.objects.filter(
-                country__iexact=name
-            ).only("emoji_id").afirst()
-
-            emoji = self.bot.get_emoji(ball.emoji_id) if ball else None
-
-            if emoji:
-                found[name.lower()] = str(emoji)
-            else:
-                missing.append(name)
-
-        result = EMOJI_RE.sub(
-            lambda match: found.get(
-                match.group(1).strip().lower(),
-                match.group(0),
+    def make_buttons(
+        self,
+        accept_callback,
+        edit_callback,
+        deny_callback,
+    ) -> tuple[
+        discord.ui.Button,
+        discord.ui.Button,
+        discord.ui.Button,
+    ]:
+        buttons = (
+            discord.ui.Button(
+                emoji="✔️",
+                style=discord.ButtonStyle.success,
             ),
-            text,
+            discord.ui.Button(
+                emoji="✏️",
+                style=discord.ButtonStyle.secondary,
+            ),
+            discord.ui.Button(
+                emoji="✖️",
+                style=discord.ButtonStyle.danger,
+            ),
         )
-
-        return result, missing
+    
+        buttons[0].callback = accept_callback
+        buttons[1].callback = edit_callback
+        buttons[2].callback = deny_callback
+    
+        return buttons
 
     async def build_draft(
         self,
@@ -185,26 +290,53 @@ class Echo(commands.Cog):
         style: str | None,
         file: discord.Attachment | None,
     ) -> tuple[Draft | None, str | None, list[str]]:
-        missing: list[str] = []
+        warnings: list[str] = []
     
         if text:
-            text, missing = await self.resolve_emojis(text)
+            text, warnings = await resolve(text, self.bot)
     
         if style == "Embed" and not text:
-            return None, "The Embed style needs a `message`.", missing
+            return None, "The Embed style needs a `message`.", warnings
     
         if style == "Container":
             if not text and not file:
-                return None, "The Container style needs a `message` or a `file`.", missing
-            if text and not [s for s in LINE_RE.split(text) if s.strip()]:
-                return None, "Your message only contains lines, add some text.", missing
+                return (
+                    None,
+                    "The Container style needs a `message` or a `file`.",
+                    warnings,
+                )
     
-        limit = {"Embed": 4096, "Container": 4000}.get(style or "", 2000)
+            if text and not any(
+                segment.strip()
+                for segment in LINE_RE.split(text)
+            ):
+                return (
+                    None,
+                    "Your message only contains lines, add some text.",
+                    warnings,
+                )
+    
+        limit = {
+            "Embed": 4096,
+            "Container": 4000,
+        }.get(style or "", 2000)
+    
         if text and len(text) > limit:
-            return None, f"Your message is too long for this style ({len(text)}/{limit} characters).", missing
+            return (
+                None,
+                f"Your message is too long for this style "
+                f"({len(text)}/{limit} characters).",
+                warnings,
+            )
     
         data = await file.read() if file else None
-        return Draft(text, style, file, data), None, missing
+    
+        return Draft(
+            text,
+            style,
+            file,
+            data,
+        ), None, warnings
 
 
     async def confirm(
@@ -216,50 +348,85 @@ class Echo(commands.Cog):
         warning: str | None = None,
     ) -> tuple[bool, discord.WebhookMessage]:
         """Confirm an optional warning, then optionally confirm the preview."""
+    
         warning_message: discord.WebhookMessage | None = None
-
+    
         if warning:
             warning_view = LayoutView(timeout=PREVIEW_TIMEOUT)
-            warning_view.add_item(
-                discord.ui.TextDisplay(warning)
-            )
-
+    
+            warning_text = discord.ui.TextDisplay(warning)
+            warning_view.add_item(warning_text)
+    
             warning_decision: asyncio.Future[bool] = (
                 asyncio.get_running_loop().create_future()
             )
-
+    
             async def warning_accept(i: Interaction):
                 if not warning_decision.done():
                     warning_decision.set_result(True)
                 await i.response.defer()
-
+    
             async def warning_deny(i: Interaction):
                 if not warning_decision.done():
                     warning_decision.set_result(False)
                 await i.response.defer()
-
-            yes = discord.ui.Button(
-                emoji="✔️",
-                style=discord.ButtonStyle.success,
+    
+            async def warning_edit(i: Interaction):
+                async def edited(
+                    modal_interaction: Interaction,
+                    new_text: str,
+                ):
+                    new_draft, error, new_warnings = await self.build_draft(
+                        new_text,
+                        draft.style,
+                        draft.attachment,
+                    )
+    
+                    if error or new_draft is None:
+                        await modal_interaction.response.send_message(
+                            error or "Could not build the message.",
+                            ephemeral=True,
+                        )
+                        return
+    
+                    draft.update_from(new_draft)
+    
+                    if new_warnings:
+                        warning_text.content = "\n\n".join(new_warnings)
+                    else:
+                        warning_text.content = (
+                            "No warnings remain. You can continue."
+                        )
+    
+                    await modal_interaction.response.defer()
+    
+                    await warning_message.edit(
+                        view=warning_view,
+                    )
+    
+                await i.response.send_modal(
+                    EditExtraModal(
+                        draft.text,
+                        edited,
+                    )
+                )
+    
+            yes, edit, no = self.make_buttons(
+                warning_accept,
+                warning_edit,
+                warning_deny,
             )
-            no = discord.ui.Button(
-                emoji="✖️",
-                style=discord.ButtonStyle.danger,
-            )
-
-            yes.callback = warning_accept
-            no.callback = warning_deny
-
+            
             warning_view.add_item(
-                discord.ui.ActionRow(yes, no)
+                discord.ui.ActionRow(yes, edit, no)
             )
-
+    
             warning_message = await interaction.followup.send(
                 view=warning_view,
                 ephemeral=True,
                 wait=True,
             )
-
+    
             try:
                 warning_accepted = await asyncio.wait_for(
                     warning_decision,
@@ -269,54 +436,98 @@ class Echo(commands.Cog):
                 warning_accepted = False
             finally:
                 warning_view.stop()
-
+    
             if not warning_accepted:
                 return False, warning_message
-
+    
             if not confirmation:
                 return True, warning_message
-
+    
         if draft.style == "Embed":
             preview_view = View(timeout=PREVIEW_TIMEOUT)
-
+    
             preview_decision: asyncio.Future[bool] = (
                 asyncio.get_running_loop().create_future()
             )
-
+    
             async def preview_accept(i: Interaction):
                 if not preview_decision.done():
                     preview_decision.set_result(True)
                 await i.response.defer()
-
+    
             async def preview_deny(i: Interaction):
                 if not preview_decision.done():
                     preview_decision.set_result(False)
                 await i.response.defer()
-
-            yes = discord.ui.Button(
-                emoji="✔️",
-                style=discord.ButtonStyle.success,
+    
+            async def preview_edit(i: Interaction):
+                async def edited(
+                    modal_interaction: Interaction,
+                    new_text: str,
+                ):
+                    new_draft, error, new_warnings = await self.build_draft(
+                        new_text,
+                        draft.style,
+                        draft.attachment,
+                    )
+    
+                    if error or new_draft is None:
+                        await modal_interaction.response.send_message(
+                            error or "Could not build the message.",
+                            ephemeral=True,
+                        )
+                        return
+    
+                    draft.update_from(new_draft)
+                    
+                    await modal_interaction.response.defer()
+                    
+                    new_view = View(timeout=PREVIEW_TIMEOUT)
+                    
+                    new_yes, new_edit, new_no = self.make_buttons(
+                        preview_accept,
+                        preview_edit,
+                        preview_deny,
+                    )
+                    
+                    new_view.add_item(new_yes)
+                    new_view.add_item(new_edit)
+                    new_view.add_item(new_no)
+                    
+                    await preview_message.edit(
+                        content=confirmation,
+                        embed=discord.Embed(description=draft.text),
+                        view=new_view,
+                    )
+    
+                await i.response.send_modal(
+                    EditExtraModal(
+                        draft.text,
+                        edited,
+                    )
+                )
+    
+            yes, edit, no = self.make_buttons(
+                preview_accept,
+                preview_edit,
+                preview_deny,
             )
-            no = discord.ui.Button(
-                emoji="✖️",
-                style=discord.ButtonStyle.danger,
-            )
-
-            yes.callback = preview_accept
-            no.callback = preview_deny
 
             preview_view.add_item(yes)
+            preview_view.add_item(edit)
             preview_view.add_item(no)
-
+    
             preview_message = await interaction.followup.send(
                 confirmation,
-                embed=discord.Embed(description=draft.text),
+                embed=discord.Embed(
+                    description=draft.text,
+                ),
                 view=preview_view,
                 files=draft.files() if with_file else [],
                 ephemeral=True,
                 wait=True,
             )
-
+    
             try:
                 confirmed = await asyncio.wait_for(
                     preview_decision,
@@ -326,15 +537,15 @@ class Echo(commands.Cog):
                 confirmed = False
             finally:
                 preview_view.stop()
-
+    
             return confirmed, preview_message
 
         preview_view = LayoutView(timeout=PREVIEW_TIMEOUT)
-
+        
         preview_view.add_item(
             discord.ui.TextDisplay(confirmation)
         )
-
+        
         if draft.style == "Container":
             preview_view.add_item(
                 draft.container(with_file)
@@ -343,61 +554,132 @@ class Echo(commands.Cog):
             preview_view.add_item(
                 discord.ui.Separator(visible=True)
             )
-
-            preview_view.add_item(
-                discord.ui.TextDisplay(
-                    draft.text or "*[file only]*"
-                )
+        
+            preview_text = discord.ui.TextDisplay(
+                draft.text or "*[file only]*"
             )
-
+        
+            preview_view.add_item(preview_text)
+        
             if with_file and (item := draft.attachment_item()):
                 preview_view.add_item(item)
-
+        
         preview_decision: asyncio.Future[bool] = (
             asyncio.get_running_loop().create_future()
         )
-
+        
+        
         async def preview_accept(i: Interaction):
             if not preview_decision.done():
                 preview_decision.set_result(True)
             await i.response.defer()
-
+        
+        
         async def preview_deny(i: Interaction):
             if not preview_decision.done():
                 preview_decision.set_result(False)
             await i.response.defer()
+        
+        
+        async def preview_edit(i: Interaction):
+            async def edited(
+                modal_interaction: Interaction,
+                new_text: str,
+            ):
+                new_draft, error, new_warnings = await self.build_draft(
+                    new_text,
+                    draft.style,
+                    draft.attachment,
+                )
+        
+                if error or new_draft is None:
+                    await modal_interaction.response.send_message(
+                        error or "Could not build the message.",
+                        ephemeral=True,
+                    )
+                    return
 
-        yes = discord.ui.Button(
-            emoji="✔️",
-            style=discord.ButtonStyle.success,
-        )
-        no = discord.ui.Button(
-            emoji="✖️",
-            style=discord.ButtonStyle.danger,
-        )
+                draft.update_from(new_draft)
+        
+                await modal_interaction.response.defer()
 
-        yes.callback = preview_accept
-        no.callback = preview_deny
+                if draft.style != "Container":
+                    preview_text.content = (
+                        draft.text or "*[file only]*"
+                    )
+        
+                    await preview_message.edit(
+                        view=preview_view,
+                    )
+                    return
+
+                new_view = LayoutView(timeout=PREVIEW_TIMEOUT)
+        
+                new_view.add_item(
+                    discord.ui.TextDisplay(confirmation)
+                )
+        
+                new_view.add_item(
+                    draft.container(with_file)
+                )
+        
+                new_yes, new_edit, new_no = self.make_buttons(
+                    preview_accept,
+                    preview_edit,
+                    preview_deny,
+                )
+
+                new_view.add_item(
+                    discord.ui.ActionRow(
+                        new_yes,
+                        new_edit,
+                        new_no,
+                    )
+                )
+
+                await preview_message.edit(
+                    view=new_view,
+                )
+        
+            await i.response.send_modal(
+                EditExtraModal(
+                    draft.text,
+                    edited,
+                )
+            )
+        
+        
+        yes, edit, no = self.make_buttons(
+            preview_accept,
+            preview_edit,
+            preview_deny,
+        )
 
         preview_view.add_item(
-            discord.ui.ActionRow(yes, no)
+            discord.ui.ActionRow(
+                yes,
+                edit,
+                no,
+            )
         )
-
         if warning_message is not None:
             await warning_message.edit(
+                content=None,
+                embed=None,
+                embeds=[],
+                attachments=draft.files() if with_file else [],
                 view=preview_view,
             )
             preview_message = warning_message
-
+        
         else:
-
             preview_message = await interaction.followup.send(
                 view=preview_view,
                 files=draft.files() if with_file else [],
                 ephemeral=True,
                 wait=True,
             )
-
+        
         try:
             confirmed = await asyncio.wait_for(
                 preview_decision,
@@ -407,7 +689,7 @@ class Echo(commands.Cog):
             confirmed = False
         finally:
             preview_view.stop()
-
+        
         return confirmed, preview_message
         
     async def edit_preview_status(
@@ -415,15 +697,8 @@ class Echo(commands.Cog):
         preview_message: discord.WebhookMessage,
         status: str,
         style: str | None,
-        components_v2: bool = False,
     ):
         """Replace the preview contents with a final status."""
-
-        if components_v2:
-            view = LayoutView(timeout=None)
-            view.add_item(discord.ui.TextDisplay(status))
-            await preview_message.edit(view=view)
-            return
 
         if style == "Embed":
             await preview_message.edit(
@@ -437,6 +712,41 @@ class Echo(commands.Cog):
         view.add_item(discord.ui.TextDisplay(status))
 
         await preview_message.edit(view=view)
+
+    @staticmethod
+    def get_message_text(message: discord.Message) -> str:
+        """Get readable text from a normal, embed, or Container message."""
+
+        if message.content:
+            return message.content
+
+        parts: list[str] = []
+
+        def walk(component) -> None:
+            content = getattr(component, "content", None)
+
+            if isinstance(content, str) and content:
+                parts.append(content)
+
+            for child in getattr(component, "children", []):
+                walk(child)
+
+        for component in message.components:
+            walk(component)
+
+        if parts:
+            return "\n".join(parts)
+
+        if message.embeds:
+            descriptions = [
+                embed.description
+                for embed in message.embeds
+                if embed.description
+            ]
+            if descriptions:
+                return "\n".join(descriptions)
+
+        return "[no text content]"
 
     @staticmethod
     def describe(
@@ -584,7 +894,7 @@ class Echo(commands.Cog):
                     await interaction.followup.send(err, ephemeral=True)
                     return
 
-            draft, err, missing_balls = await cog.build_draft(
+            draft, err, extra_warnings = await cog.build_draft(
                 message,
                 style,
                 None if edit_msg else file,
@@ -607,14 +917,10 @@ class Echo(commands.Cog):
                 edit_msg,
                 None if edit_msg else file,
             )
-
-            if missing_balls or preview:
-                warning = (
-                    unknown_balls_warning(missing_balls)
-                    if missing_balls
-                    else None
-                )
-
+            
+            if extra_warnings or preview:
+                warning = "\n\n".join(extra_warnings) if extra_warnings else None
+            
                 confirmed, preview_message = await cog.confirm(
                     interaction,
                     confirmation if preview else "",
@@ -633,29 +939,12 @@ class Echo(commands.Cog):
 
             if edit_msg:
                 try:
-                    previous = (edit_msg.content or "[no text content]")[:200]
-                    kwargs = draft.payload(with_file=False)
-                    kwargs.pop("files")
+                    previous = cog.get_message_text(edit_msg)[:200]
 
-                    if style == "Container":
-                        await edit_msg.edit(
-                            content=None,
-                            embed=None,
-                            allowed_mentions=allowed,
-                            **kwargs,
-                        )
-                    elif style == "Embed":
-                        await edit_msg.edit(
-                            content=None,
-                            allowed_mentions=allowed,
-                            **kwargs,
-                        )
-                    else:
-                        await edit_msg.edit(
-                            embed=None,
-                            allowed_mentions=allowed,
-                            **kwargs,
-                        )
+                    await edit_msg.edit(
+                        allowed_mentions=allowed,
+                        **draft.edit_payload(),
+                    )
 
                     if preview_message:
                         await cog.edit_preview_status(
@@ -668,18 +957,30 @@ class Echo(commands.Cog):
                             "Message edited!",
                             ephemeral=True,
                         )
+
                     parts = [
-                        f"{interaction.user} edited a message in #{edit_msg.channel} {edit_msg.jump_url}",
+                        f"{interaction.user} edited a message in "
+                        f"#{edit_msg.channel} {edit_msg.jump_url}",
                         f"Message: {draft.text!r}",
                         f"Style: {style or 'Text'}",
                         f"Mentions: {mention}",
                         f"Previous message: {previous!r}",
                     ]
+
                     webhook_log(" | ".join(parts))
+
                 except discord.Forbidden:
-                    await interaction.followup.send("Missing permissions to edit that message.", ephemeral=True)
+                    await interaction.followup.send(
+                        "Missing permissions to edit that message.",
+                        ephemeral=True,
+                    )
+
                 except Exception as error:
-                    await interaction.followup.send(f"Error:\n```py\n{error}\n```", ephemeral=True)
+                    await interaction.followup.send(
+                        f"Error:\n```py\n{error}\n```",
+                        ephemeral=True,
+                    )
+
                 return
 
             if dm:
