@@ -7,7 +7,7 @@ Add this to config/extra.toml (or create the file if it doesn't exist)
 ```toml
 # Echo Package
 [[ballsdex.packages]]
-location = "git+https://github.com/GlitchedGlitch/BallsDex-Echo-Package.git@2.0.0"
+location = "git+https://github.com/GlitchedGlitch/BallsDex-Echo-Package.git@2.1.0"
 path = "echo"
 enabled = true
 ```
@@ -29,7 +29,28 @@ This package has a lot of features!!!
 
 There are also special qol characters to make your life easier!
 
+There are also special QoL characters to make your life easier!
+
 | Character | Description |
 |-----------|-------------|
-| {e:Ball Full Name} |Send a ball emoji if available|
-| {s:line} | Create a separator line on container style |
+| {e:Ball Full Name} | Send a ball emoji if available |
+| {s:line} | Create a separator line when using Container style |
+| {c:model} | Show the number of objects for a model |
+| {c:model:filter} | Show the number of objects matching a specific filter |
+| {t:D/M/Y H:M:S} | Convert a date/time into a Discord timestamp |
+| {t:D/M/Y H:M:S:type} | Convert a date/time into a Discord timestamp with a specific display format |
+
+|List of available models|
+|------------------------|
+|economies|
+|regimes|
+|groups|
+|balls|
+|ballinstances|
+|guildconfigs|
+|players|
+|specials|
+|guilds|
+|specialinstances|
+
+For timestamp formats you can see [this](https://gist.github.com/LeviSnoot/d9147767abeef2f770e9ddcd91eb85aa) page. They're the last letters in the timestamp btw!
