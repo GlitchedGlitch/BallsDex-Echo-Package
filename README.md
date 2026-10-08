@@ -27,8 +27,6 @@ This package has a lot of features!!!
 |Mention|If mentions should be on|
 |Preview|Preview your message before sending|
 
-There are also special qol characters to make your life easier!
-
 There are also special QoL characters to make your life easier!
 
 | Character | Description |
